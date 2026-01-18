@@ -1,0 +1,49 @@
+{{- if .Values.monitoring.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "render-farm.fullname" . }}
+  labels:
+    {{- include "render-farm.labels" . | nindent 4 }}
+    prometheus: kube-prometheus
+spec:
+  jobLabel: job-id
+  selector:
+    matchLabels:
+      {{- include "render-farm.selectorLabels" . | nindent 6 }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  endpoints:
+    - port: metrics
+      interval: {{ .Values.monitoring.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.monitoring.serviceMonitor.scrapeTimeout }}
+      path: {{ .Values.monitoring.prometheus.path }}
+      scheme: http
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node
+        - sourceLabels: [__meta_kubernetes_pod_label_job_id]
+          targetLabel: job_id
+{{- end }}
+---
+{{- if .Values.monitoring.serviceMonitor.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "render-farm.fullname" . }}-metrics
+  labels:
+    {{- include "render-farm.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - name: metrics
+      port: {{ .Values.monitoring.prometheus.port }}
+      targetPort: metrics
+      protocol: TCP
+  selector:
+    {{- include "render-farm.selectorLabels" . | nindent 4 }}
+{{- end }}

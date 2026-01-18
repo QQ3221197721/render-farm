@@ -1,0 +1,219 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "render-farm.fullname" . }}-{{ .Values.global.jobId }}
+  labels:
+    {{- include "render-farm.labels" . | nindent 4 }}
+  annotations:
+    description: "Blender render job - {{ .Values.render.frameStart }} to {{ .Values.render.frameEnd }}"
+spec:
+  parallelism: {{ .Values.render.parallelism }}
+  completions: {{ .Values.render.completions }}
+  completionMode: Indexed
+  backoffLimit: {{ .Values.job.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.job.activeDeadlineSeconds }}
+  ttlSecondsAfterFinished: {{ .Values.job.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        {{- include "render-farm.selectorLabels" . | nindent 8 }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "{{ .Values.monitoring.prometheus.port }}"
+        prometheus.io/path: "{{ .Values.monitoring.prometheus.path }}"
+    spec:
+      restartPolicy: OnFailure
+      terminationGracePeriodSeconds: 120
+      
+      {{- if .Values.job.priorityClassName }}
+      priorityClassName: {{ .Values.job.priorityClassName }}
+      {{- end }}
+      
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      
+      # ============ Spot中断容忍 ============
+      tolerations:
+        {{- toYaml .Values.tolerations | nindent 8 }}
+      
+      # ============ 节点亲和性 ============
+      affinity:
+        nodeAffinity:
+          {{- toYaml .Values.nodeAffinity | nindent 10 }}
+        {{- if .Values.podAntiAffinity.enabled }}
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    {{- include "render-farm.selectorLabels" . | nindent 20 }}
+                topologyKey: {{ .Values.podAntiAffinity.topologyKey }}
+        {{- end }}
+      
+      # ============ Init容器：下载工程文件 ============
+      initContainers:
+        - name: download-blend
+          image: python:3.11-slim
+          command:
+            - /bin/sh
+            - -c
+            - |
+              pip install --quiet oss2 boto3
+              python3 /scripts/download.py
+          env:
+            - name: CLOUD_PROVIDER
+              value: "{{ .Values.global.cloudProvider }}"
+            - name: BLEND_FILE_URL
+              value: "{{ .Values.render.blendFile }}"
+            - name: LOCAL_PATH
+              value: "/data/input/scene.blend"
+          envFrom:
+            - secretRef:
+                name: {{ include "render-farm.fullname" . }}-credentials
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: scripts
+              mountPath: /scripts
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+      
+      # ============ 主容器：Blender渲染 ============
+      containers:
+        - name: blender-render
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          
+          env:
+            # Pod信息
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            # Job索引 (每个Pod渲染对应索引的帧)
+            - name: JOB_COMPLETION_INDEX
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
+            # 任务配置
+            - name: JOB_ID
+              value: "{{ .Values.global.jobId }}"
+            - name: CLOUD_PROVIDER
+              value: "{{ .Values.global.cloudProvider }}"
+            - name: BUCKET_NAME
+              value: "{{ .Values.render.outputBucket }}"
+            - name: BLEND_FILE
+              value: "/data/input/scene.blend"
+            - name: OUTPUT_DIR
+              value: "/data/output"
+            # 渲染配置
+            - name: RENDER_ENGINE
+              value: "{{ .Values.render.engine }}"
+            - name: RENDER_DEVICE
+              value: "{{ .Values.render.device }}"
+            - name: OUTPUT_FORMAT
+              value: "{{ .Values.render.outputFormat }}"
+            - name: RESOLUTION_X
+              value: "{{ .Values.render.resolutionX }}"
+            - name: RESOLUTION_Y
+              value: "{{ .Values.render.resolutionY }}"
+            - name: SAMPLES
+              value: "{{ .Values.render.samples }}"
+            # 检查点配置
+            - name: CHECKPOINT_ENABLED
+              value: "{{ .Values.checkpoint.enabled }}"
+            - name: CHECKPOINT_INTERVAL
+              value: "{{ .Values.checkpoint.interval }}"
+            - name: CHECKPOINT_PATH
+              value: "{{ .Values.checkpoint.storagePath }}"
+            # 日志配置
+            - name: LOG_LEVEL
+              value: "{{ .Values.logging.level }}"
+            - name: LOG_FORMAT
+              value: "{{ .Values.logging.format }}"
+            # 云配置
+            {{- include "render-farm.cloudConfig" . | nindent 12 }}
+          
+          envFrom:
+            - secretRef:
+                name: {{ include "render-farm.fullname" . }}-credentials
+          
+          {{- if eq .Values.render.device "GPU" }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- else }}
+          resources:
+            {{- toYaml .Values.resourcesCPU | nindent 12 }}
+          {{- end }}
+          
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: dshm
+              mountPath: /dev/shm
+            - name: scripts
+              mountPath: /opt/scripts
+          
+          # ============ Spot中断信号处理 ============
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    echo "[PRESTOP] 收到终止信号，保存检查点..."
+                    python3 /opt/scripts/save_checkpoint.py
+                    sleep 5
+          
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.monitoring.prometheus.port }}
+              protocol: TCP
+          
+          # 健康检查
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+            initialDelaySeconds: 30
+            periodSeconds: 60
+            timeoutSeconds: 10
+            failureThreshold: 3
+          
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+      
+      volumes:
+        - name: data
+          emptyDir:
+            sizeLimit: {{ .Values.storage.ephemeralSize }}
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.storage.shmSize }}
+        - name: scripts
+          configMap:
+            name: {{ include "render-farm.fullname" . }}-scripts
+            defaultMode: 0755

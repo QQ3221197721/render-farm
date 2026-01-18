@@ -1,0 +1,204 @@
+# ============================================================
+# 多云离线渲染农场 - Helm Values 配置
+# ============================================================
+
+# ============ 全局配置 ============
+global:
+  # 云服务商: aliyun / aws
+  cloudProvider: aliyun
+  # 任务唯一标识
+  jobId: "render-job-001"
+  # 命名空间
+  namespace: render-jobs
+
+# ============ 渲染任务配置 ============
+render:
+  # Blender工程文件路径 (OSS/S3)
+  blendFile: "oss://render-input/scene.blend"
+  # 输出存储桶
+  outputBucket: "render-output"
+  # 帧范围
+  frameStart: 1
+  frameEnd: 100
+  # 并发Pod数量
+  parallelism: 12
+  # 总完成数
+  completions: 100
+  # 渲染引擎: CYCLES / EEVEE
+  engine: CYCLES
+  # 渲染设备: GPU / CPU
+  device: GPU
+  # 输出格式
+  outputFormat: PNG
+  # 分辨率
+  resolutionX: 3840
+  resolutionY: 2160
+  # 采样数 (CYCLES)
+  samples: 128
+
+# ============ 镜像配置 ============
+image:
+  repository: registry.cn-shanghai.aliyuncs.com/render-farm/blender-node
+  tag: "3.6-gpu"
+  pullPolicy: IfNotPresent
+  # 私有仓库凭证
+  pullSecrets: []
+
+# ============ 资源配置 ============
+resources:
+  requests:
+    cpu: "3"
+    memory: "12Gi"
+    nvidia.com/gpu: "1"
+  limits:
+    cpu: "4"
+    memory: "15Gi"
+    nvidia.com/gpu: "1"
+
+# CPU渲染模式资源配置 (无GPU)
+resourcesCPU:
+  requests:
+    cpu: "7"
+    memory: "28Gi"
+  limits:
+    cpu: "8"
+    memory: "32Gi"
+
+# ============ Spot节点容忍 ============
+tolerations:
+  # 阿里云Spot节点标签
+  - key: "k8s.aliyun.com/ecs-spot"
+    operator: "Equal"
+    value: "true"
+    effect: "NoSchedule"
+  # AWS Spot节点标签
+  - key: "kubernetes.io/spot"
+    operator: "Equal"
+    value: "true"
+    effect: "NoSchedule"
+  # 节点不可用容忍
+  - key: "node.kubernetes.io/not-ready"
+    operator: "Exists"
+    effect: "NoExecute"
+    tolerationSeconds: 60
+  - key: "node.kubernetes.io/unreachable"
+    operator: "Exists"
+    effect: "NoExecute"
+    tolerationSeconds: 60
+
+# ============ 节点亲和性 - 多云调度 ============
+nodeAffinity:
+  preferredDuringSchedulingIgnoredDuringExecution:
+    # 优先选择阿里云Spot节点（价格更低）
+    - weight: 100
+      preference:
+        matchExpressions:
+          - key: cloud.provider/name
+            operator: In
+            values: ["aliyun"]
+          - key: node.kubernetes.io/instance-type
+            operator: In
+            values: 
+              - "ecs.gn6i-c4g1.xlarge"
+              - "ecs.gn6i-c8g1.2xlarge"
+              - "ecs.gn7i-c8g1.2xlarge"
+    # 次选AWS Spot节点
+    - weight: 50
+      preference:
+        matchExpressions:
+          - key: cloud.provider/name
+            operator: In
+            values: ["aws"]
+          - key: node.kubernetes.io/instance-type
+            operator: In
+            values: 
+              - "g4dn.xlarge"
+              - "g4dn.2xlarge"
+              - "g5.xlarge"
+
+# ============ Pod反亲和性 ============
+podAntiAffinity:
+  enabled: true
+  # 避免同一节点运行多个渲染Pod
+  topologyKey: kubernetes.io/hostname
+
+# ============ HPA配置 ============
+autoscaling:
+  enabled: false  # Job模式通常不需要HPA
+  minReplicas: 4
+  maxReplicas: 20
+  targetCPUUtilization: 80
+  scaleDownStabilization: 300
+
+# ============ Job配置 ============
+job:
+  # 失败重试次数
+  backoffLimit: 3
+  # 任务超时时间(秒) - 24小时
+  activeDeadlineSeconds: 86400
+  # 完成后保留时间(秒)
+  ttlSecondsAfterFinished: 3600
+  # 优先级类
+  priorityClassName: "spot-workload"
+
+# ============ 检查点配置 ============
+checkpoint:
+  enabled: true
+  # 检查点保存间隔(秒)
+  interval: 60
+  # 检查点存储路径
+  storagePath: "checkpoints/"
+
+# ============ 监控配置 ============
+monitoring:
+  enabled: true
+  prometheus:
+    # Prometheus指标端口
+    port: 8000
+    path: /metrics
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+    scrapeTimeout: 10s
+  # Grafana Dashboard ConfigMap
+  grafanaDashboard:
+    enabled: true
+
+# ============ 日志配置 ============
+logging:
+  level: INFO
+  # 输出格式: json / text
+  format: json
+
+# ============ 存储配置 ============
+storage:
+  # 临时存储大小
+  ephemeralSize: 50Gi
+  # 共享内存大小 (用于GPU渲染)
+  shmSize: 8Gi
+
+# ============ 阿里云凭证 ============
+aliyun:
+  accessKeyId: ""
+  accessKeySecret: ""
+  ossEndpoint: "oss-cn-shanghai-internal.aliyuncs.com"
+  ossRegion: "cn-shanghai"
+
+# ============ AWS凭证 ============
+aws:
+  accessKeyId: ""
+  secretAccessKey: ""
+  region: "us-east-1"
+  s3Endpoint: ""  # 留空使用默认
+
+# ============ 通知配置 ============
+notification:
+  enabled: false
+  # 钉钉机器人
+  dingtalk:
+    enabled: false
+    webhook: ""
+  # Slack
+  slack:
+    enabled: false
+    webhook: ""

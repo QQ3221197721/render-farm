@@ -1,0 +1,80 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "render-farm.fullname" . }}-scripts
+  labels:
+    {{- include "render-farm.labels" . | nindent 4 }}
+data:
+  download.py: |
+    #!/usr/bin/env python3
+    """下载Blender工程文件"""
+    import os
+    import sys
+    
+    CLOUD_PROVIDER = os.getenv('CLOUD_PROVIDER', 'aliyun')
+    BLEND_FILE_URL = os.getenv('BLEND_FILE_URL')
+    LOCAL_PATH = os.getenv('LOCAL_PATH', '/data/input/scene.blend')
+    
+    os.makedirs(os.path.dirname(LOCAL_PATH), exist_ok=True)
+    
+    if CLOUD_PROVIDER == 'aliyun':
+        import oss2
+        # oss://bucket-name/path/to/file.blend
+        parts = BLEND_FILE_URL.replace('oss://', '').split('/', 1)
+        bucket_name, object_key = parts[0], parts[1]
+        
+        auth = oss2.Auth(
+            os.getenv('ALIBABA_CLOUD_ACCESS_KEY_ID'),
+            os.getenv('ALIBABA_CLOUD_ACCESS_KEY_SECRET')
+        )
+        endpoint = os.getenv('OSS_ENDPOINT', 'oss-cn-shanghai.aliyuncs.com')
+        bucket = oss2.Bucket(auth, endpoint, bucket_name)
+        bucket.get_object_to_file(object_key, LOCAL_PATH)
+        print(f"[OSS] Downloaded: {BLEND_FILE_URL} -> {LOCAL_PATH}")
+    else:
+        import boto3
+        # s3://bucket-name/path/to/file.blend
+        parts = BLEND_FILE_URL.replace('s3://', '').split('/', 1)
+        bucket_name, object_key = parts[0], parts[1]
+        
+        s3 = boto3.client('s3',
+            aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
+            aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
+            region_name=os.getenv('AWS_REGION', 'us-east-1')
+        )
+        s3.download_file(bucket_name, object_key, LOCAL_PATH)
+        print(f"[S3] Downloaded: {BLEND_FILE_URL} -> {LOCAL_PATH}")
+
+  save_checkpoint.py: |
+    #!/usr/bin/env python3
+    """保存渲染检查点"""
+    import os
+    import json
+    import time
+    
+    CHECKPOINT_PATH = os.getenv('CHECKPOINT_PATH', 'checkpoints/')
+    OUTPUT_DIR = os.getenv('OUTPUT_DIR', '/data/output')
+    POD_NAME = os.getenv('POD_NAME', 'unknown')
+    JOB_ID = os.getenv('JOB_ID', 'default')
+    
+    checkpoint_file = f"{OUTPUT_DIR}/checkpoint.json"
+    
+    # 读取当前进度
+    current_frame = 0
+    if os.path.exists(checkpoint_file):
+        with open(checkpoint_file) as f:
+            data = json.load(f)
+            current_frame = data.get('current_frame', 0)
+    
+    checkpoint = {
+        'pod_name': POD_NAME,
+        'job_id': JOB_ID,
+        'current_frame': current_frame,
+        'timestamp': time.time(),
+        'status': 'interrupted'
+    }
+    
+    with open(checkpoint_file, 'w') as f:
+        json.dump(checkpoint, f)
+    
+    print(f"[CHECKPOINT] Saved: frame {current_frame}")

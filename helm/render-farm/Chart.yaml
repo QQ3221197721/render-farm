@@ -1,0 +1,20 @@
+apiVersion: v2
+name: render-farm
+description: |
+  Multi-cloud Blender render farm with Spot instances
+  支持阿里云ACK + AWS EKS 混合部署
+  内置Spot中断容忍、检查点机制、自动上传OSS/S3
+type: application
+version: 1.0.0
+appVersion: "3.6"
+keywords:
+  - blender
+  - rendering
+  - spot-instances
+  - multi-cloud
+  - kubernetes
+  - batch-processing
+home: https://github.com/your-org/render-farm
+maintainers:
+  - name: DevOps Team
+    email: devops@example.com

@@ -1,0 +1,76 @@
+# ============================================================
+# 阿里云ACK专用配置 - Spot节点池渲染
+# 使用方法: helm install -f values-aliyun.yaml
+# ============================================================
+
+global:
+  cloudProvider: aliyun
+  jobId: "aliyun-render-001"
+
+render:
+  blendFile: "oss://your-bucket/project/scene.blend"
+  outputBucket: "your-output-bucket"
+  frameStart: 1
+  frameEnd: 100
+  parallelism: 10
+  completions: 100
+  engine: CYCLES
+  device: GPU
+
+image:
+  repository: registry.cn-shanghai.aliyuncs.com/render-farm/blender-node
+  tag: "3.6-gpu"
+
+# GPU资源配置
+resources:
+  requests:
+    cpu: "3"
+    memory: "12Gi"
+    nvidia.com/gpu: "1"
+  limits:
+    cpu: "4"
+    memory: "15Gi"
+    nvidia.com/gpu: "1"
+
+# 阿里云Spot节点容忍
+tolerations:
+  - key: "k8s.aliyun.com/ecs-spot"
+    operator: "Equal"
+    value: "true"
+    effect: "NoSchedule"
+  - key: "node.kubernetes.io/not-ready"
+    operator: "Exists"
+    effect: "NoExecute"
+    tolerationSeconds: 60
+
+# 节点亲和性 - 优先选择阿里云GPU Spot
+nodeAffinity:
+  requiredDuringSchedulingIgnoredDuringExecution:
+    nodeSelectorTerms:
+      - matchExpressions:
+          - key: k8s.aliyun.com/ecs-spot
+            operator: In
+            values: ["true"]
+  preferredDuringSchedulingIgnoredDuringExecution:
+    - weight: 100
+      preference:
+        matchExpressions:
+          - key: node.kubernetes.io/instance-type
+            operator: In
+            values:
+              - "ecs.gn6i-c4g1.xlarge"
+              - "ecs.gn6i-c8g1.2xlarge"
+              - "ecs.gn7i-c8g1.2xlarge"
+
+# 阿里云凭证 (部署时通过--set覆盖)
+aliyun:
+  accessKeyId: ""
+  accessKeySecret: ""
+  ossEndpoint: "oss-cn-shanghai-internal.aliyuncs.com"
+  ossRegion: "cn-shanghai"
+
+# 监控配置
+monitoring:
+  enabled: true
+  serviceMonitor:
+    enabled: true

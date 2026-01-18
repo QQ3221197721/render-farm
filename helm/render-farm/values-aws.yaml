@@ -1,0 +1,81 @@
+# ============================================================
+# AWS EKS专用配置 - Spot节点池渲染
+# 使用方法: helm install -f values-aws.yaml
+# ============================================================
+
+global:
+  cloudProvider: aws
+  jobId: "aws-render-001"
+
+render:
+  blendFile: "s3://your-bucket/project/scene.blend"
+  outputBucket: "your-output-bucket"
+  frameStart: 1
+  frameEnd: 100
+  parallelism: 10
+  completions: 100
+  engine: CYCLES
+  device: GPU
+
+image:
+  repository: your-account.dkr.ecr.us-east-1.amazonaws.com/blender-node
+  tag: "3.6-gpu"
+
+# GPU资源配置
+resources:
+  requests:
+    cpu: "3"
+    memory: "12Gi"
+    nvidia.com/gpu: "1"
+  limits:
+    cpu: "4"
+    memory: "15Gi"
+    nvidia.com/gpu: "1"
+
+# AWS Spot节点容忍
+tolerations:
+  - key: "kubernetes.io/spot"
+    operator: "Equal"
+    value: "true"
+    effect: "NoSchedule"
+  - key: "node.kubernetes.io/not-ready"
+    operator: "Exists"
+    effect: "NoExecute"
+    tolerationSeconds: 60
+  # Karpenter Spot容忍
+  - key: "karpenter.sh/capacity-type"
+    operator: "Equal"
+    value: "spot"
+    effect: "NoSchedule"
+
+# 节点亲和性 - 优先选择AWS GPU Spot
+nodeAffinity:
+  requiredDuringSchedulingIgnoredDuringExecution:
+    nodeSelectorTerms:
+      - matchExpressions:
+          - key: karpenter.sh/capacity-type
+            operator: In
+            values: ["spot"]
+  preferredDuringSchedulingIgnoredDuringExecution:
+    - weight: 100
+      preference:
+        matchExpressions:
+          - key: node.kubernetes.io/instance-type
+            operator: In
+            values:
+              - "g4dn.xlarge"
+              - "g4dn.2xlarge"
+              - "g5.xlarge"
+              - "g5.2xlarge"
+
+# AWS凭证 (部署时通过--set覆盖)
+aws:
+  accessKeyId: ""
+  secretAccessKey: ""
+  region: "us-east-1"
+
+# 监控配置
+monitoring:
+  enabled: true
+  serviceMonitor:
+    enabled: true

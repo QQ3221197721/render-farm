@@ -1,0 +1,254 @@
+# ============================================================
+# Karpenter NodePool - AWS EKS GPU Spot节点自动扩缩
+# 用于在AWS上自动创建和管理GPU Spot实例
+# 文档: https://karpenter.sh/docs/
+# ============================================================
+{{- if and (eq .Values.global.cloudProvider "aws") .Values.karpenter.enabled }}
+apiVersion: karpenter.sh/v1beta1
+kind: NodePool
+metadata:
+  name: {{ include "render-farm.fullname" . }}-gpu-spot
+  labels:
+    {{- include "render-farm.labels" . | nindent 4 }}
+spec:
+  # 节点模板引用
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "render-farm.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        karpenter.sh/capacity-type: spot
+        workload-type: render-farm
+    spec:
+      # 节点要求
+      requirements:
+        # 只使用Spot实例
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["spot"]
+        # GPU实例类型
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values:
+            {{- toYaml .Values.karpenter.instanceTypes | nindent 12 }}
+        # 可用区
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values:
+            {{- toYaml .Values.karpenter.availabilityZones | nindent 12 }}
+        # 架构
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+      
+      # 节点类引用
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: {{ include "render-farm.fullname" . }}-gpu
+      
+      # Spot中断处理的容忍时间
+      expireAfter: {{ .Values.karpenter.expireAfter | default "720h" }}
+
+  # 资源限制 - 防止成本失控
+  limits:
+    cpu: {{ .Values.karpenter.limits.cpu | default "200" | quote }}
+    memory: {{ .Values.karpenter.limits.memory | default "800Gi" | quote }}
+    nvidia.com/gpu: {{ .Values.karpenter.limits.gpu | default "20" | quote }}
+
+  # 节点整合 - 自动合并空闲节点
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: {{ .Values.karpenter.consolidateAfter | default "30s" }}
+    
+  # 权重 - 多个NodePool时的优先级
+  weight: {{ .Values.karpenter.weight | default 10 }}
+
+---
+# ============================================================
+# EC2NodeClass - AWS EC2节点配置模板
+# ============================================================
+apiVersion: karpenter.k8s.aws/v1beta1
+kind: EC2NodeClass
+metadata:
+  name: {{ include "render-farm.fullname" . }}-gpu
+  labels:
+    {{- include "render-farm.labels" . | nindent 4 }}
+spec:
+  # AMI选择器 - 使用EKS优化的GPU AMI
+  amiFamily: AL2
+  
+  # 子网选择器
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: {{ .Values.karpenter.clusterName | default "render-cluster" }}
+  
+  # 安全组选择器
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: {{ .Values.karpenter.clusterName | default "render-cluster" }}
+  
+  # IAM实例配置文件
+  instanceProfile: {{ .Values.karpenter.instanceProfile | default "KarpenterNodeInstanceProfile" }}
+  
+  # 块存储配置
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        volumeSize: {{ .Values.karpenter.rootVolumeSize | default "100Gi" }}
+        volumeType: gp3
+        iops: 3000
+        throughput: 125
+        encrypted: true
+        deleteOnTermination: true
+  
+  # 用户数据 - 节点启动脚本
+  userData: |
+    #!/bin/bash
+    set -e
+    
+    # 安装NVIDIA驱动
+    echo "Installing NVIDIA drivers..."
+    yum install -y nvidia-driver-latest-dkms
+    
+    # 配置Docker使用NVIDIA运行时
+    cat > /etc/docker/daemon.json <<EOF
+    {
+      "default-runtime": "nvidia",
+      "runtimes": {
+        "nvidia": {
+          "path": "nvidia-container-runtime",
+          "runtimeArgs": []
+        }
+      }
+    }
+    EOF
+    
+    # 重启Docker
+    systemctl restart docker
+    
+    # 配置kubelet参数优化大内存GPU节点
+    cat >> /etc/kubernetes/kubelet/kubelet-config.json <<EOF
+    {
+      "imageGCHighThresholdPercent": 85,
+      "imageGCLowThresholdPercent": 80
+    }
+    EOF
+  
+  # 标签
+  tags:
+    Name: {{ include "render-farm.fullname" . }}-gpu-node
+    Environment: {{ .Values.karpenter.environment | default "production" }}
+    Project: render-farm
+    ManagedBy: karpenter
+  
+  # 详细监控
+  detailedMonitoring: {{ .Values.karpenter.detailedMonitoring | default false }}
+  
+  # 元数据选项 - IMDSv2安全配置
+  metadataOptions:
+    httpEndpoint: enabled
+    httpProtocolIPv6: disabled
+    httpPutResponseHopLimit: 2
+    httpTokens: required
+
+---
+# ============================================================
+# CPU Spot NodePool - 备用无GPU节点池
+# 当GPU实例不可用时自动回退到CPU渲染
+# ============================================================
+{{- if .Values.karpenter.cpuFallback.enabled }}
+apiVersion: karpenter.sh/v1beta1
+kind: NodePool
+metadata:
+  name: {{ include "render-farm.fullname" . }}-cpu-spot
+  labels:
+    {{- include "render-farm.labels" . | nindent 4 }}
+spec:
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "render-farm.name" . }}
+        karpenter.sh/capacity-type: spot
+        workload-type: render-farm-cpu
+    spec:
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["spot"]
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values:
+            - c5.2xlarge
+            - c5a.2xlarge
+            - c6i.2xlarge
+            - c6a.2xlarge
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values:
+            {{- toYaml .Values.karpenter.availabilityZones | nindent 12 }}
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+      
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: {{ include "render-farm.fullname" . }}-cpu
+      
+      expireAfter: 720h
+
+  limits:
+    cpu: "100"
+    memory: "400Gi"
+
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 30s
+  
+  # 较低权重 - GPU池优先
+  weight: 5
+{{- end }}
+
+---
+# ============================================================
+# CPU EC2NodeClass
+# ============================================================
+{{- if .Values.karpenter.cpuFallback.enabled }}
+apiVersion: karpenter.k8s.aws/v1beta1
+kind: EC2NodeClass
+metadata:
+  name: {{ include "render-farm.fullname" . }}-cpu
+  labels:
+    {{- include "render-farm.labels" . | nindent 4 }}
+spec:
+  amiFamily: AL2
+  
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: {{ .Values.karpenter.clusterName | default "render-cluster" }}
+  
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: {{ .Values.karpenter.clusterName | default "render-cluster" }}
+  
+  instanceProfile: {{ .Values.karpenter.instanceProfile | default "KarpenterNodeInstanceProfile" }}
+  
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        volumeSize: 50Gi
+        volumeType: gp3
+        encrypted: true
+        deleteOnTermination: true
+  
+  tags:
+    Name: {{ include "render-farm.fullname" . }}-cpu-node
+    Project: render-farm
+    ManagedBy: karpenter
+  
+  metadataOptions:
+    httpEndpoint: enabled
+    httpTokens: required
+{{- end }}
+{{- end }}

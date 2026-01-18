@@ -172,6 +172,59 @@ function Remove-RenderResources {
     Write-Info "清理完成"
 }
 
+# 构建Docker镜像
+function Build-DockerImage {
+    Write-Info "构建Docker镜像..."
+    
+    $ScriptDir = Split-Path -Parent $MyInvocation.ScriptName
+    $DockerDir = Join-Path (Split-Path -Parent $ScriptDir) "docker"
+    
+    if ($CloudProvider -eq "aliyun") {
+        $ImageRepo = if ($env:IMAGE_REPO) { $env:IMAGE_REPO } else { "registry.cn-shanghai.aliyuncs.com/render-farm/blender-node" }
+        
+        # 登录阿里云镜像仓库
+        if ($env:ALIYUN_AK -and $env:ALIYUN_SK) {
+            Write-Info "登录阿里云容器镜像服务..."
+            docker login --username="$($env:ALIYUN_AK)" --password="$($env:ALIYUN_SK)" registry.cn-shanghai.aliyuncs.com
+        }
+    }
+    else {
+        $ImageRepo = if ($env:IMAGE_REPO) { $env:IMAGE_REPO } else { "$($env:AWS_ACCOUNT_ID).dkr.ecr.us-east-1.amazonaws.com/blender-node" }
+        
+        # 登录AWS ECR
+        if ($env:AWS_REGION) {
+            Write-Info "登录AWS ECR..."
+            $ecrPassword = aws ecr get-login-password --region $env:AWS_REGION
+            $ecrPassword | docker login --username AWS --password-stdin "$($env:AWS_ACCOUNT_ID).dkr.ecr.$($env:AWS_REGION).amazonaws.com"
+        }
+    }
+    
+    $ImageTag = if ($env:IMAGE_TAG) { $env:IMAGE_TAG } else { "3.6-gpu" }
+    $FullImage = "${ImageRepo}:${ImageTag}"
+    
+    Write-Info "构建镜像: $FullImage"
+    Push-Location $DockerDir
+    try {
+        docker build -t $FullImage .
+        if ($LASTEXITCODE -ne 0) {
+            Write-Err "Docker构建失败"
+            exit 1
+        }
+        
+        Write-Info "推送镜像: $FullImage"
+        docker push $FullImage
+        if ($LASTEXITCODE -ne 0) {
+            Write-Err "Docker推送失败"
+            exit 1
+        }
+        
+        Write-Info "镜像构建完成: $FullImage"
+    }
+    finally {
+        Pop-Location
+    }
+}
+
 # 显示帮助
 function Show-Help {
     @"
@@ -241,6 +294,10 @@ switch ($Action) {
     }
     "cleanup" {
         Remove-RenderResources
+    }
+    "build" {
+        Test-Dependencies
+        Build-DockerImage
     }
     "help" {
         Show-Help

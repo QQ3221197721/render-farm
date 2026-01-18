@@ -1,0 +1,46 @@
+# ============================================================
+# PriorityClass - Spot工作负载优先级定义
+# 用于K8s调度优先级控制，确保渲染任务在资源紧张时能够合理调度
+# ============================================================
+{{- if .Values.priorityClass.enabled }}
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: {{ .Values.job.priorityClassName | default "spot-workload" }}
+  labels:
+    {{- include "render-farm.labels" . | nindent 4 }}
+# Spot工作负载优先级设置为负值
+# 这意味着在资源紧张时，这些Pod可以被更高优先级的工作负载抢占
+# 适合Spot实例的特性：便宜但可能随时被回收
+value: {{ .Values.priorityClass.value | default -100 }}
+# 全局默认：false
+# 不将此优先级设为默认，只有显式指定的Pod才会使用
+globalDefault: {{ .Values.priorityClass.globalDefault | default false }}
+# 抢占策略：PreemptLowerPriority
+# 允许此优先级的Pod抢占更低优先级的Pod
+preemptionPolicy: {{ .Values.priorityClass.preemptionPolicy | default "PreemptLowerPriority" }}
+description: |
+  Priority class for Spot instance workloads in render farm.
+  Designed for batch rendering jobs that can tolerate interruptions.
+  Low priority value (-100) ensures critical workloads take precedence.
+{{- end }}
+---
+# ============================================================
+# 高优先级 PriorityClass - 用于关键任务
+# 例如最后几帧的渲染、紧急补帧等场景
+# ============================================================
+{{- if .Values.priorityClass.highPriority.enabled }}
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: render-critical
+  labels:
+    {{- include "render-farm.labels" . | nindent 4 }}
+# 正值优先级，高于Spot工作负载
+value: {{ .Values.priorityClass.highPriority.value | default 100 }}
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: |
+  High priority class for critical render tasks.
+  Use for final frames or urgent re-renders that must complete quickly.
+{{- end }}

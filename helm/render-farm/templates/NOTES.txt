@@ -1,0 +1,107 @@
+============================================================
+  多云离线渲染农场 - {{ include "render-farm.fullname" . }}
+============================================================
+
+感谢使用 Render Farm Helm Chart!
+
+任务信息:
+  - 任务ID: {{ .Values.global.jobId }}
+  - 云服务商: {{ .Values.global.cloudProvider }}
+  - 帧范围: {{ .Values.render.frameStart }} - {{ .Values.render.frameEnd }}
+  - 并发度: {{ .Values.render.parallelism }}
+  - 总帧数: {{ .Values.render.completions }}
+
+查看任务状态:
+
+  kubectl get jobs -n {{ .Release.Namespace }} -l job-id={{ .Values.global.jobId }}
+
+查看运行中的Pods:
+
+  kubectl get pods -n {{ .Release.Namespace }} -l job-id={{ .Values.global.jobId }} --watch
+
+查看渲染日志:
+
+  # 查看第一个Pod日志
+  kubectl logs -n {{ .Release.Namespace }} -l job-id={{ .Values.global.jobId }} -f --max-log-requests=10
+
+  # 查看特定Pod日志
+  kubectl logs -n {{ .Release.Namespace }} <pod-name> -f
+
+{{- if .Values.monitoring.enabled }}
+
+监控面板:
+
+  {{- if .Values.monitoring.serviceMonitor.enabled }}
+  - ServiceMonitor已启用，Prometheus将自动发现并抓取指标
+  {{- end }}
+  
+  {{- if .Values.monitoring.grafanaDashboard.enabled }}
+  - Grafana Dashboard已创建，在Grafana中搜索 "Render Farm Monitor"
+  {{- end }}
+
+  # 手动查看Prometheus指标
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "render-farm.fullname" . }}-metrics 8000:8000
+  curl http://localhost:8000/metrics
+
+{{- end }}
+
+{{- if .Values.monitoring.prometheusRule.enabled }}
+
+告警规则:
+
+  已配置以下告警:
+  - RenderFailureRateHigh: 渲染失败率 > 2%
+  - RenderFailureRateCritical: 渲染失败率 > 10%
+  - SpotInterruptionFrequent: 1小时内Spot中断 > 5次
+  - RenderProgressStalled: 10分钟内无新帧完成
+  - EstimatedCostExceeded: 预估成本超过 ${{ .Values.monitoring.prometheusRule.costThreshold | default 50 }}
+
+{{- end }}
+
+渲染完成后:
+
+  # 检查任务完成状态
+  kubectl get jobs -n {{ .Release.Namespace }} {{ include "render-farm.fullname" . }}-{{ .Values.global.jobId }}
+
+  # 渲染结果已上传至:
+  {{- if eq .Values.global.cloudProvider "aliyun" }}
+  oss://{{ .Values.render.outputBucket }}/renders/{{ .Values.global.jobId }}/
+  {{- else }}
+  s3://{{ .Values.render.outputBucket }}/renders/{{ .Values.global.jobId }}/
+  {{- end }}
+
+清理资源:
+
+  helm uninstall {{ .Release.Name }} -n {{ .Release.Namespace }}
+
+遇到问题?
+
+  # 查看Pod详情
+  kubectl describe pod -n {{ .Release.Namespace }} <pod-name>
+
+  # 查看事件
+  kubectl get events -n {{ .Release.Namespace }} --sort-by='.lastTimestamp'
+
+  # 检查Spot中断
+  kubectl logs -n {{ .Release.Namespace }} -l job-id={{ .Values.global.jobId }} | grep -i "spot\|termination\|interrupt"
+
+{{- if eq .Values.global.cloudProvider "aws" }}
+{{- if .Values.karpenter.enabled }}
+
+Karpenter自动扩缩:
+
+  已启用Karpenter NodePool，将自动管理GPU Spot节点
+  
+  # 查看Karpenter创建的节点
+  kubectl get nodes -l karpenter.sh/capacity-type=spot
+  
+  # 查看NodePool状态
+  kubectl get nodepools
+  kubectl get ec2nodeclasses
+
+{{- end }}
+{{- end }}
+
+============================================================
+  祝渲染顺利！
+============================================================

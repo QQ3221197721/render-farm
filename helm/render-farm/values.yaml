@@ -163,6 +163,11 @@ monitoring:
   # Grafana Dashboard ConfigMap
   grafanaDashboard:
     enabled: true
+  # PrometheusRule告警配置
+  prometheusRule:
+    enabled: true
+    # 成本告警阈值 (USD)
+    costThreshold: 50
 
 # ============ 日志配置 ============
 logging:
@@ -202,3 +207,84 @@ notification:
   slack:
     enabled: false
     webhook: ""
+
+# ============ PriorityClass配置 ============
+priorityClass:
+  enabled: true
+  # Spot工作负载优先级 (负值表示低优先级)
+  value: -100
+  globalDefault: false
+  preemptionPolicy: PreemptLowerPriority
+  # 高优先级任务配置
+  highPriority:
+    enabled: false
+    value: 100
+
+# ============ Karpenter配置 (AWS EKS) ============
+karpenter:
+  enabled: false
+  # EKS集群名称
+  clusterName: "render-cluster"
+  # IAM实例配置文件
+  instanceProfile: "KarpenterNodeInstanceProfile"
+  # GPU实例类型
+  instanceTypes:
+    - g4dn.xlarge
+    - g4dn.2xlarge
+    - g5.xlarge
+    - g5.2xlarge
+  # 可用区
+  availabilityZones:
+    - us-east-1a
+    - us-east-1b
+    - us-east-1c
+  # 节点过期时间
+  expireAfter: "720h"
+  # 节点整合等待时间
+  consolidateAfter: "30s"
+  # 节点池权重
+  weight: 10
+  # 资源限制
+  limits:
+    cpu: "200"
+    memory: "800Gi"
+    gpu: "20"
+  # 根卷大小
+  rootVolumeSize: "100Gi"
+  # 环境标签
+  environment: "production"
+  # 详细监控
+  detailedMonitoring: false
+  # CPU回退方案
+  cpuFallback:
+    enabled: false
+
+# ============ 阿里云自动伸缩配置 (ACK) ============
+aliyunAutoscaler:
+  enabled: false
+  # GPU节点池配置
+  gpu:
+    minSize: 0
+    maxSize: 20
+    desiredSize: 0
+    instanceTypes:
+      - ecs.gn6i-c4g1.xlarge
+      - ecs.gn6i-c8g1.2xlarge
+      - ecs.gn7i-c8g1.2xlarge
+    spotPriceLimit: 0.5
+  # CPU节点池配置 (备用)
+  cpu:
+    minSize: 0
+    maxSize: 10
+    desiredSize: 0
+    instanceTypes:
+      - ecs.g6.2xlarge
+      - ecs.c6.2xlarge
+    spotPriceLimit: 0.2
+  # 缩容策略
+  scaleDownDelayAfterAdd: "5m"
+  scaleDownDelayAfterDelete: "1m"
+  scaleDownUnneededTime: "3m"
+  maxEmptyBulkDelete: 10
+  # 扩容策略: least-waste / random / most-pods / priority
+  expanderStrategy: "least-waste"

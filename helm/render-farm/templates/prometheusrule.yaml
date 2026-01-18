@@ -1,0 +1,179 @@
+# ============================================================
+# PrometheusRule - 渲染农场告警规则
+# 基于Prometheus Operator的告警配置
+# ============================================================
+{{- if and .Values.monitoring.enabled .Values.monitoring.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "render-farm.fullname" . }}-alerts
+  labels:
+    {{- include "render-farm.labels" . | nindent 4 }}
+    prometheus: kube-prometheus
+    role: alert-rules
+spec:
+  groups:
+    # ============================================================
+    # 渲染任务告警组
+    # ============================================================
+    - name: render-farm.rules
+      rules:
+        # ------------------------------------------------------------
+        # 告警: 渲染失败率过高
+        # 当失败率超过2%时触发，这可能意味着存在系统性问题
+        # ------------------------------------------------------------
+        - alert: RenderFailureRateHigh
+          expr: |
+            sum(rate(render_frames_total{status="failed",job_id="{{ .Values.global.jobId }}"}[10m])) 
+            / 
+            (sum(rate(render_frames_total{job_id="{{ .Values.global.jobId }}"}[10m])) + 0.001) 
+            > 0.02
+          for: 5m
+          labels:
+            severity: warning
+            job_id: "{{ .Values.global.jobId }}"
+          annotations:
+            summary: "渲染失败率过高"
+            description: "任务 {{ .Values.global.jobId }} 的渲染失败率超过2%，当前值: {{ "{{ $value | humanizePercentage }}" }}"
+            runbook_url: "https://wiki.example.com/runbooks/render-farm/high-failure-rate"
+
+        # ------------------------------------------------------------
+        # 告警: 渲染失败率严重
+        # 当失败率超过10%时触发紧急告警
+        # ------------------------------------------------------------
+        - alert: RenderFailureRateCritical
+          expr: |
+            sum(rate(render_frames_total{status="failed",job_id="{{ .Values.global.jobId }}"}[10m])) 
+            / 
+            (sum(rate(render_frames_total{job_id="{{ .Values.global.jobId }}"}[10m])) + 0.001) 
+            > 0.1
+          for: 2m
+          labels:
+            severity: critical
+            job_id: "{{ .Values.global.jobId }}"
+          annotations:
+            summary: "渲染失败率严重过高"
+            description: "任务 {{ .Values.global.jobId }} 的渲染失败率超过10%，需要立即处理！当前值: {{ "{{ $value | humanizePercentage }}" }}"
+
+        # ------------------------------------------------------------
+        # 告警: Spot实例中断频繁
+        # 当1小时内中断次数超过5次时触发
+        # ------------------------------------------------------------
+        - alert: SpotInterruptionFrequent
+          expr: |
+            sum(increase(render_spot_interruptions_total{job_id="{{ .Values.global.jobId }}"}[1h])) > 5
+          for: 1m
+          labels:
+            severity: warning
+            job_id: "{{ .Values.global.jobId }}"
+          annotations:
+            summary: "Spot实例中断频繁"
+            description: "任务 {{ .Values.global.jobId }} 在过去1小时内发生 {{ "{{ $value }}" }} 次Spot中断，建议检查Spot价格或切换实例类型"
+
+        # ------------------------------------------------------------
+        # 告警: 渲染进度停滞
+        # 当10分钟内没有新帧完成时触发
+        # ------------------------------------------------------------
+        - alert: RenderProgressStalled
+          expr: |
+            increase(render_frames_total{status="success",job_id="{{ .Values.global.jobId }}"}[10m]) == 0
+            and
+            sum(render_frames_total{status="success",job_id="{{ .Values.global.jobId }}"}) < {{ .Values.render.completions }}
+          for: 10m
+          labels:
+            severity: warning
+            job_id: "{{ .Values.global.jobId }}"
+          annotations:
+            summary: "渲染进度停滞"
+            description: "任务 {{ .Values.global.jobId }} 已经10分钟没有新帧完成，请检查Pod状态"
+
+        # ------------------------------------------------------------
+        # 告警: 单帧渲染时间过长
+        # 当P95渲染时间超过2小时时触发
+        # ------------------------------------------------------------
+        - alert: RenderDurationTooLong
+          expr: |
+            histogram_quantile(0.95, sum(rate(render_duration_seconds_bucket{job_id="{{ .Values.global.jobId }}"}[30m])) by (le)) > 7200
+          for: 5m
+          labels:
+            severity: warning
+            job_id: "{{ .Values.global.jobId }}"
+          annotations:
+            summary: "单帧渲染时间过长"
+            description: "任务 {{ .Values.global.jobId }} 的P95渲染时间超过2小时，当前值: {{ "{{ $value | humanizeDuration }}" }}"
+
+        # ------------------------------------------------------------
+        # 告警: 活跃Pod数量不足
+        # 当活跃Pod数低于预期并发度的50%时触发
+        # ------------------------------------------------------------
+        - alert: InsufficientActivePods
+          expr: |
+            count(up{job_id="{{ .Values.global.jobId }}"} == 1) < {{ div .Values.render.parallelism 2 }}
+          for: 5m
+          labels:
+            severity: warning
+            job_id: "{{ .Values.global.jobId }}"
+          annotations:
+            summary: "活跃Pod数量不足"
+            description: "任务 {{ .Values.global.jobId }} 的活跃Pod数低于预期 ({{ .Values.render.parallelism }}) 的50%，当前: {{ "{{ $value }}" }}"
+
+        # ------------------------------------------------------------
+        # 告警: 预估成本超出预算
+        # 当预估成本超过50美元时触发
+        # ------------------------------------------------------------
+        - alert: EstimatedCostExceeded
+          expr: |
+            sum(render_estimated_cost_usd{job_id="{{ .Values.global.jobId }}"}) > {{ .Values.monitoring.prometheusRule.costThreshold | default 50 }}
+          for: 1m
+          labels:
+            severity: warning
+            job_id: "{{ .Values.global.jobId }}"
+          annotations:
+            summary: "预估成本超出预算"
+            description: "任务 {{ .Values.global.jobId }} 的预估成本已超过 ${{ .Values.monitoring.prometheusRule.costThreshold | default 50 }}，当前: ${{ "{{ $value | printf \"%.2f\" }}" }}"
+
+        # ------------------------------------------------------------
+        # 告警: 任务即将超时
+        # 当任务运行时间超过配置的80%时触发预警
+        # ------------------------------------------------------------
+        - alert: JobDeadlineApproaching
+          expr: |
+            (time() - kube_job_status_start_time{job_name=~".*{{ .Values.global.jobId }}.*"}) 
+            / {{ .Values.job.activeDeadlineSeconds }} 
+            > 0.8
+          for: 1m
+          labels:
+            severity: warning
+            job_id: "{{ .Values.global.jobId }}"
+          annotations:
+            summary: "任务即将超时"
+            description: "任务 {{ .Values.global.jobId }} 已运行超过80%的超时时间，请关注进度"
+
+    # ============================================================
+    # 记录规则组 - 预计算常用指标
+    # ============================================================
+    - name: render-farm.recording
+      rules:
+        # 渲染完成进度百分比
+        - record: render_farm:progress_percent
+          expr: |
+            sum(render_frames_total{status="success",job_id="{{ .Values.global.jobId }}"}) 
+            / {{ .Values.render.completions }} * 100
+
+        # 渲染速率 (帧/分钟)
+        - record: render_farm:frames_per_minute
+          expr: |
+            sum(rate(render_frames_total{status="success",job_id="{{ .Values.global.jobId }}"}[5m])) * 60
+
+        # 预计剩余时间 (秒)
+        - record: render_farm:estimated_remaining_seconds
+          expr: |
+            ({{ .Values.render.completions }} - sum(render_frames_total{status="success",job_id="{{ .Values.global.jobId }}"})) 
+            / (sum(rate(render_frames_total{status="success",job_id="{{ .Values.global.jobId }}"}[5m])) + 0.001)
+
+        # 总失败率
+        - record: render_farm:total_failure_rate
+          expr: |
+            sum(render_frames_total{status="failed",job_id="{{ .Values.global.jobId }}"}) 
+            / (sum(render_frames_total{job_id="{{ .Values.global.jobId }}"}) + 0.001)
+{{- end }}

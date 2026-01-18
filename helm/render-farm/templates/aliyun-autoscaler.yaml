@@ -1,0 +1,210 @@
+# ============================================================
+# 阿里云ACK集群自动伸缩配置
+# 用于配合ACK cluster-autoscaler实现节点自动扩缩
+# 注意：这是一个独立的配置示例，需要在ACK控制台或通过Terraform应用
+# ============================================================
+{{- if and (eq .Values.global.cloudProvider "aliyun") .Values.aliyunAutoscaler.enabled }}
+
+# ClusterAutoScaler配置 (ConfigMap)
+# ACK内置cluster-autoscaler会读取此配置
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "render-farm.fullname" . }}-autoscaler-config
+  namespace: kube-system
+  labels:
+    {{- include "render-farm.labels" . | nindent 4 }}
+data:
+  # 节点组配置 - JSON格式
+  node-groups.json: |
+    {
+      "nodeGroups": [
+        {
+          "name": "render-gpu-spot",
+          "minSize": {{ .Values.aliyunAutoscaler.gpu.minSize | default 0 }},
+          "maxSize": {{ .Values.aliyunAutoscaler.gpu.maxSize | default 20 }},
+          "desiredSize": {{ .Values.aliyunAutoscaler.gpu.desiredSize | default 0 }},
+          "instanceTypes": {{ .Values.aliyunAutoscaler.gpu.instanceTypes | toJson }},
+          "spotStrategy": "SpotAsPriceGo",
+          "spotPriceLimit": {{ .Values.aliyunAutoscaler.gpu.spotPriceLimit | default 0.5 }},
+          "labels": {
+            "workload-type": "render-farm",
+            "gpu-enabled": "true"
+          },
+          "taints": [
+            {
+              "key": "k8s.aliyun.com/ecs-spot",
+              "value": "true",
+              "effect": "NoSchedule"
+            }
+          ]
+        },
+        {
+          "name": "render-cpu-spot",
+          "minSize": {{ .Values.aliyunAutoscaler.cpu.minSize | default 0 }},
+          "maxSize": {{ .Values.aliyunAutoscaler.cpu.maxSize | default 10 }},
+          "desiredSize": {{ .Values.aliyunAutoscaler.cpu.desiredSize | default 0 }},
+          "instanceTypes": {{ .Values.aliyunAutoscaler.cpu.instanceTypes | toJson }},
+          "spotStrategy": "SpotAsPriceGo",
+          "spotPriceLimit": {{ .Values.aliyunAutoscaler.cpu.spotPriceLimit | default 0.2 }},
+          "labels": {
+            "workload-type": "render-farm",
+            "gpu-enabled": "false"
+          },
+          "taints": [
+            {
+              "key": "k8s.aliyun.com/ecs-spot",
+              "value": "true",
+              "effect": "NoSchedule"
+            }
+          ]
+        }
+      ],
+      "autoscalerOptions": {
+        "scaleDownDelayAfterAdd": "{{ .Values.aliyunAutoscaler.scaleDownDelayAfterAdd | default "5m" }}",
+        "scaleDownDelayAfterDelete": "{{ .Values.aliyunAutoscaler.scaleDownDelayAfterDelete | default "1m" }}",
+        "scaleDownUnneededTime": "{{ .Values.aliyunAutoscaler.scaleDownUnneededTime | default "3m" }}",
+        "maxEmptyBulkDelete": {{ .Values.aliyunAutoscaler.maxEmptyBulkDelete | default 10 }},
+        "expanderStrategy": "{{ .Values.aliyunAutoscaler.expanderStrategy | default "least-waste" }}"
+      }
+    }
+
+---
+# ============================================================
+# 弹性伸缩说明文档 (ConfigMap)
+# ============================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "render-farm.fullname" . }}-autoscaler-readme
+  labels:
+    {{- include "render-farm.labels" . | nindent 4 }}
+data:
+  README.md: |
+    # 阿里云ACK节点自动伸缩配置指南
+
+    ## 概述
+    本配置用于在阿里云ACK集群中启用GPU Spot节点自动伸缩，
+    以支持渲染农场的弹性计算需求。
+
+    ## 前置条件
+    1. 已创建ACK托管集群
+    2. 已安装cluster-autoscaler组件
+    3. 已配置RAM角色权限
+
+    ## 节点池配置
+
+    ### GPU Spot节点池
+    - 实例类型: {{ .Values.aliyunAutoscaler.gpu.instanceTypes | join ", " }}
+    - 最小节点数: {{ .Values.aliyunAutoscaler.gpu.minSize | default 0 }}
+    - 最大节点数: {{ .Values.aliyunAutoscaler.gpu.maxSize | default 20 }}
+    - Spot价格上限: {{ .Values.aliyunAutoscaler.gpu.spotPriceLimit | default 0.5 }} USD/h
+
+    ### CPU Spot节点池 (备用)
+    - 实例类型: {{ .Values.aliyunAutoscaler.cpu.instanceTypes | join ", " }}
+    - 最小节点数: {{ .Values.aliyunAutoscaler.cpu.minSize | default 0 }}
+    - 最大节点数: {{ .Values.aliyunAutoscaler.cpu.maxSize | default 10 }}
+    - Spot价格上限: {{ .Values.aliyunAutoscaler.cpu.spotPriceLimit | default 0.2 }} USD/h
+
+    ## 通过控制台创建节点池
+
+    1. 登录ACK控制台
+    2. 进入集群 -> 节点管理 -> 节点池
+    3. 创建节点池，选择以下配置:
+       - 节点池类型: 抢占式实例
+       - 实例规格: 选择GPU实例 (如 ecs.gn6i-c4g1.xlarge)
+       - 竞价策略: 自动出价
+       - 启用自动伸缩
+
+    ## 通过Terraform创建 (推荐)
+
+    ```hcl
+    resource "alicloud_cs_kubernetes_node_pool" "render_gpu_spot" {
+      cluster_id     = alicloud_cs_managed_kubernetes.cluster.id
+      name           = "render-gpu-spot"
+      vswitch_ids    = [alicloud_vswitch.default.id]
+      instance_types = ["ecs.gn6i-c4g1.xlarge", "ecs.gn6i-c8g1.2xlarge"]
+      
+      scaling_config {
+        min_size = 0
+        max_size = 20
+      }
+      
+      spot_strategy    = "SpotAsPriceGo"
+      spot_price_limit = [{ instance_type = "ecs.gn6i-c4g1.xlarge", price_limit = "0.5" }]
+      
+      labels = {
+        "workload-type" = "render-farm"
+      }
+      
+      taints {
+        key    = "k8s.aliyun.com/ecs-spot"
+        value  = "true"
+        effect = "NoSchedule"
+      }
+    }
+    ```
+
+    ## 验证配置
+
+    ```bash
+    # 查看节点池状态
+    kubectl get nodes -l workload-type=render-farm
+
+    # 查看cluster-autoscaler日志
+    kubectl logs -n kube-system -l app=cluster-autoscaler -f
+
+    # 触发扩容测试
+    kubectl apply -f test-scale-job.yaml
+    ```
+
+    ## 成本优化建议
+
+    1. 使用Spot实例可节省60-80%成本
+    2. 选择多个可用区提高Spot可用性
+    3. 配置多种实例类型增加调度灵活性
+    4. 设置合理的scaleDownUnneededTime避免频繁缩容
+
+---
+# ============================================================
+# 测试扩容Job示例
+# ============================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "render-farm.fullname" . }}-test-scale
+  labels:
+    {{- include "render-farm.labels" . | nindent 4 }}
+data:
+  test-scale-job.yaml: |
+    # 用于测试节点自动伸缩的示例Job
+    apiVersion: batch/v1
+    kind: Job
+    metadata:
+      name: test-autoscale
+    spec:
+      parallelism: 5
+      completions: 5
+      template:
+        spec:
+          tolerations:
+            - key: "k8s.aliyun.com/ecs-spot"
+              operator: "Equal"
+              value: "true"
+              effect: "NoSchedule"
+          containers:
+            - name: test
+              image: busybox
+              command: ["sleep", "300"]
+              resources:
+                requests:
+                  cpu: "3"
+                  memory: "12Gi"
+                  nvidia.com/gpu: "1"
+                limits:
+                  cpu: "4"
+                  memory: "15Gi"
+                  nvidia.com/gpu: "1"
+          restartPolicy: Never
+
+{{- end }}
